@@ -1,0 +1,10 @@
+﻿# Credentials and secrets - NEVER commit these
+.databrickscfg
+*.env
+secrets.json
+
+# OS/Editor junk
+.DS_Store
+Thumbs.db
+*.pyc
+__pycache__/
