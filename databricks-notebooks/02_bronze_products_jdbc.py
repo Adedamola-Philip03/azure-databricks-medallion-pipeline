@@ -1,70 +1,100 @@
 # Databricks notebook source
 # ---------------------------------------------------------
 # Bronze Layer — Products (Cloud Source: Azure SQL Database)
-# Price column intentionally read as string; Silver applies try_cast.
+# Price stays untouched as raw string here — type casting is a Silver
+# concern, not Bronze's.
 # ---------------------------------------------------------
 
 # COMMAND ----------
 
-spark.sql("CREATE SCHEMA IF NOT EXISTS dataengineering.cloud_pipeline")
-
-# COMMAND ----------
-
+import logging
 import uuid
 from datetime import datetime, timezone
+from pyspark.sql import DataFrame
 from pyspark.sql.functions import lit, sha2, concat_ws, current_user
 
-jdbc_hostname = "wolfsanalytics.database.windows.net"
-jdbc_port = 1433
-jdbc_database = "DataEngineeringPractice"
-
-jdbc_url = f"jdbc:sqlserver://{jdbc_hostname}:{jdbc_port};database={jdbc_database};encrypt=true;trustServerCertificate=false;loginTimeout=30"
-
-sql_password = dbutils.secrets.get(scope="azure-sql-secrets", key="sql-admin-password")
-
-connection_properties = {
-    "user": "wolfsanalytics_admin",
-    "password": sql_password,
-    "driver": "com.microsoft.sqlserver.jdbc.SQLServerDriver"
-}
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("bronze_products")
 
 # COMMAND ----------
 
-batch_id = str(uuid.uuid4())
-ingested_at = datetime.now(timezone.utc).isoformat()
+JDBC_HOSTNAME = "wolfsanalytics.database.windows.net"
+JDBC_PORT = 1433
+JDBC_DATABASE = "DataEngineeringPractice"
+SOURCE_TABLE = "dbo.products_raw_import"
+BRONZE_TABLE = "dataengineering.cloud_pipeline.bronze_products"
 
-print(f"Batch ID: {batch_id}")
-print(f"Ingested at: {ingested_at}")
-
-# COMMAND ----------
-
-df_raw = spark.read.jdbc(url=jdbc_url, table="dbo.products_raw_import", properties=connection_properties)
-
-row_count_received = df_raw.count()
-print(f"Rows received: {row_count_received}")
-df_raw.printSchema()
-df_raw.show(5, truncate=False)
+JDBC_URL = f"jdbc:sqlserver://{JDBC_HOSTNAME}:{JDBC_PORT};database={JDBC_DATABASE};encrypt=true;trustServerCertificate=false;loginTimeout=30"
 
 # COMMAND ----------
 
-df_bronze = (
-    df_raw
-    .withColumn("batch_id", lit(batch_id))
-    .withColumn("source_file", lit("Azure SQL: dbo.products_raw_import"))
-    .withColumn("ingested_at", lit(ingested_at))
-    .withColumn("ingested_by", current_user())
-    .withColumn("row_hash", sha2(concat_ws("||", *[c for c in df_raw.columns]), 256))
-)
+def get_connection_properties() -> dict:
+    """Builds JDBC connection properties, retrieving the password
+    securely from Databricks Secrets at call time — never hardcoded."""
+    sql_password = dbutils.secrets.get(scope="azure-sql-secrets", key="sql-admin-password")
+    return {
+        "user": "wolfsanalytics_admin",
+        "password": sql_password,
+        "driver": "com.microsoft.sqlserver.jdbc.SQLServerDriver"
+    }
 
 # COMMAND ----------
 
-bronze_table = "dataengineering.cloud_pipeline.bronze_products"
+def read_source_table() -> DataFrame:
+    """Reads the raw staging table from Azure SQL Database via JDBC."""
+    connection_properties = get_connection_properties()
+    return spark.read.jdbc(url=JDBC_URL, table=SOURCE_TABLE, properties=connection_properties)
 
-(
-    df_bronze.write
-    .mode("append")
-    .option("mergeSchema", "true")
-    .saveAsTable(bronze_table)
-)
+# COMMAND ----------
 
-print(f"Written {row_count_received} rows to {bronze_table}")
+def attach_lineage(df: DataFrame, batch_id: str, ingested_at: str) -> DataFrame:
+    """Attaches lineage columns to every row. Price stays untouched here
+    (still raw string) — type casting is a Silver concern, not Bronze's."""
+    return (
+        df
+        .withColumn("batch_id", lit(batch_id))
+        .withColumn("source_file", lit(f"Azure SQL: {SOURCE_TABLE}"))
+        .withColumn("ingested_at", lit(ingested_at))
+        .withColumn("ingested_by", current_user())
+        .withColumn("row_hash", sha2(concat_ws("||", *[c for c in df.columns]), 256))
+    )
+
+# COMMAND ----------
+
+def run_bronze_products() -> dict:
+    """Executes the full Bronze ingestion run for Products."""
+    run_started_at = datetime.now(timezone.utc).isoformat()
+
+    batch_id = str(uuid.uuid4())
+    ingested_at = datetime.now(timezone.utc).isoformat()
+
+    logger.info(f"Bronze Products run started — batch_id: {batch_id}")
+
+    df_raw = read_source_table()
+    rows_received = df_raw.count()
+
+    df_bronze = attach_lineage(df_raw, batch_id, ingested_at)
+
+    (
+        df_bronze.write
+        .mode("append")
+        .option("mergeSchema", "true")
+        .saveAsTable(BRONZE_TABLE)
+    )
+
+    metrics = {
+        "run_started_at": run_started_at,
+        "run_completed_at": datetime.now(timezone.utc).isoformat(),
+        "batch_id": batch_id,
+        "rows_received": rows_received,
+        "rows_written": rows_received,
+        "status": "success",
+    }
+
+    logger.info(f"Bronze Products run complete: {metrics}")
+    return metrics
+
+# COMMAND ----------
+
+metrics = run_bronze_products()
+metrics
