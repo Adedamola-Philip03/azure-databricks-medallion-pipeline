@@ -2,8 +2,8 @@
 # ---------------------------------------------------------
 # Silver Layer — Customers
 # Deduplicates, standardizes, and validates Bronze customer records.
-# Business rules are externalized as configuration rather than hardcoded
-# inline, so rule changes don't require touching pipeline logic.
+# Incremental processing: only Bronze rows ingested since the last
+# successful run are processed, tracked via a bookmark table.
 # ---------------------------------------------------------
 
 # COMMAND ----------
@@ -22,6 +22,32 @@ logger = logging.getLogger("silver_customers")
 
 # COMMAND ----------
 
+def get_last_processed_timestamp(table_name: str) -> str:
+    """Reads the bookmark for a given Silver table. Returns a very old
+    default timestamp if this table has never been processed before,
+    so the first run correctly treats all of Bronze as new."""
+    result = spark.sql(f"""
+        SELECT MAX(last_processed_ingested_at) AS last_ts
+        FROM dataengineering.cloud_pipeline.processing_log
+        WHERE table_name = '{table_name}'
+    """).collect()[0]["last_ts"]
+    return result if result else "1900-01-01T00:00:00"
+
+# COMMAND ----------
+
+def update_processing_log(table_name: str, latest_ingested_at: str) -> None:
+    """Records the newest ingested_at actually processed in this run.
+    Only called after a successful merge — a bookmark that can be wrong
+    is worse than no bookmark, since it would silently skip real data
+    on every future run."""
+    processed_at = datetime.now(timezone.utc).isoformat()
+    spark.sql(f"""
+        INSERT INTO dataengineering.cloud_pipeline.processing_log
+        VALUES ('{table_name}', '{latest_ingested_at}', '{processed_at}')
+    """)
+
+# COMMAND ----------
+
 BRONZE_TABLE = "dataengineering.cloud_pipeline.bronze_customers"
 SILVER_TABLE = "dataengineering.cloud_pipeline.silver_customers"
 REJECTED_TABLE = "dataengineering.cloud_pipeline.rejected_customers"
@@ -34,9 +60,7 @@ EMAIL_PATTERN = r"^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
 
 def profile_bronze_table(df: DataFrame, name: str) -> None:
     """Inspects a Bronze table for data quality signals before any
-    cleaning/validation logic is written against it. This is how an
-    engineer approaches an unfamiliar dataset — profile first, assume
-    nothing."""
+    cleaning/validation logic is written against it."""
     logger.info(f"Profiling {name}: {df.count()} rows")
 
     null_exprs = [count(when(col(c).isNull(), c)).alias(c) for c in df.columns]
@@ -53,9 +77,7 @@ def profile_bronze_table(df: DataFrame, name: str) -> None:
 # COMMAND ----------
 
 def deduplicate_latest(df: DataFrame, business_key: str, order_col: str = "ingested_at") -> DataFrame:
-    """Keep only the most recently ingested record per business key.
-    Bronze retains full history across all batches; Silver represents
-    current state only."""
+    """Keep only the most recently ingested record per business key."""
     window_spec = Window.partitionBy(business_key).orderBy(desc(order_col))
     return (
         df.withColumn("_rn", row_number().over(window_spec))
@@ -67,8 +89,7 @@ def deduplicate_latest(df: DataFrame, business_key: str, order_col: str = "inges
 
 def standardize_customer_fields(df: DataFrame) -> DataFrame:
     """Trim whitespace, normalize casing, and resolve known 'fake null'
-    representations (the literal string 'null', confirmed present via
-    profiling) to true nulls."""
+    representations to true nulls."""
     return (
         df.withColumn("CustomerName", initcap(trim(col("CustomerName"))))
           .withColumn("Country", initcap(trim(col("Country"))))
@@ -80,11 +101,7 @@ def standardize_customer_fields(df: DataFrame) -> DataFrame:
 # COMMAND ----------
 
 def validate_customers(df: DataFrame) -> DataFrame:
-    """Apply business rules discovered/confirmed via profiling.
-    Country is a hard rejection rule — an unrecognized country breaks
-    referential and reporting integrity. Email is a soft quality flag —
-    a bad email doesn't disqualify a customer from being counted in
-    revenue or order reporting; it flags a contactability gap instead."""
+    """Country is a hard rejection rule. Email is a soft quality flag."""
     return (
         df.withColumn("is_country_valid", col("Country").isin(VALID_COUNTRIES))
           .withColumn(
@@ -103,16 +120,29 @@ def validate_customers(df: DataFrame) -> DataFrame:
 # COMMAND ----------
 
 def run_silver_customers() -> dict:
-    """Executes the full Silver processing run: profile → dedup → clean
-    → validate → merge/reject. Returns a metrics dict suitable for
-    logging to an audit table or monitoring dashboard."""
+    """Executes the full Silver processing run with incremental
+    processing via the bookmark table."""
     run_started_at = datetime.now(timezone.utc).isoformat()
     logger.info("Silver Customers run started")
 
-    df_bronze = spark.read.table(BRONZE_TABLE)
-    profile_bronze_table(df_bronze, "bronze_customers")
+    last_processed = get_last_processed_timestamp("customers")
+    logger.info(f"Last processed timestamp: {last_processed}")
 
+    df_bronze = spark.read.table(BRONZE_TABLE).filter(col("ingested_at") > last_processed)
     rows_read = df_bronze.count()
+
+    if rows_read == 0:
+        logger.info("No new rows to process — skipping run.")
+        return {
+            "run_started_at": run_started_at,
+            "run_completed_at": datetime.now(timezone.utc).isoformat(),
+            "rows_read": 0,
+            "rows_good": 0,
+            "rows_rejected": 0,
+            "status": "skipped_no_new_data",
+        }
+
+    profile_bronze_table(df_bronze, "bronze_customers")
 
     df_deduped = deduplicate_latest(df_bronze, BUSINESS_KEY)
     df_cleaned = standardize_customer_fields(df_deduped)
@@ -142,6 +172,9 @@ def run_silver_customers() -> dict:
 
     if rows_rejected > 0:
         df_rejected.write.mode("append").saveAsTable(REJECTED_TABLE)
+
+    latest_ingested_at = df_bronze.agg({"ingested_at": "max"}).collect()[0][0]
+    update_processing_log("customers", latest_ingested_at)
 
     metrics = {
         "run_started_at": run_started_at,
