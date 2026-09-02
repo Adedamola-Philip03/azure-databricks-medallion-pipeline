@@ -1,10 +1,13 @@
 # Databricks notebook source
 # ---------------------------------------------------------
 # Gold Layer — Business Aggregates
-# Built exclusively on validated Silver tables. Any row excluded during
-# Silver validation (bad prices, unknown references, invalid data) is
-# correctly absent from these numbers by construction, not by luck.
+# Uses shared configuration from 00_config for environment-aware
+# catalog/schema names. Built exclusively on validated Silver tables.
 # ---------------------------------------------------------
+
+# COMMAND ----------
+
+%run /Workspace/Users/adedeji2503@gmail.com/00_config
 
 # COMMAND ----------
 
@@ -18,12 +21,12 @@ logger = logging.getLogger("gold_aggregates")
 
 # COMMAND ----------
 
-SILVER_CUSTOMERS_TABLE = "dataengineering.cloud_pipeline.silver_customers"
-SILVER_PRODUCTS_TABLE = "dataengineering.cloud_pipeline.silver_products"
-SILVER_ORDERS_TABLE = "dataengineering.cloud_pipeline.silver_orders"
+SILVER_CUSTOMERS_TABLE = f"{CATALOG}.{SCHEMA}.silver_customers"
+SILVER_PRODUCTS_TABLE = f"{CATALOG}.{SCHEMA}.silver_products"
+SILVER_ORDERS_TABLE = f"{CATALOG}.{SCHEMA}.silver_orders"
 
-GOLD_CUSTOMER_SUMMARY_TABLE = "dataengineering.cloud_pipeline.gold_customer_country_summary"
-GOLD_REVENUE_TABLE = "dataengineering.cloud_pipeline.gold_revenue_by_category"
+GOLD_CUSTOMER_SUMMARY_TABLE = f"{CATALOG}.{SCHEMA}.gold_customer_country_summary"
+GOLD_REVENUE_TABLE = f"{CATALOG}.{SCHEMA}.gold_revenue_by_category"
 
 # COMMAND ----------
 
@@ -66,10 +69,7 @@ def build_revenue_by_category(df_orders: DataFrame, df_products: DataFrame) -> D
 # COMMAND ----------
 
 def run_gold_aggregates() -> dict:
-    """Rebuilds both Gold aggregate tables from current Silver data.
-    Gold is fully derived and reproducible — every run overwrites the
-    prior result rather than merging, since Gold has no independent
-    state of its own."""
+    """Rebuilds both Gold aggregate tables from current Silver data."""
     run_started_at = datetime.now(timezone.utc).isoformat()
     logger.info("Gold aggregates run started")
 
