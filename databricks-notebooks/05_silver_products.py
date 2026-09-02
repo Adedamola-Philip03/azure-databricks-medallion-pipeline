@@ -1,13 +1,13 @@
 # Databricks notebook source
 # ---------------------------------------------------------
 # Silver Layer — Products
-# Deduplicates, standardizes, and validates Bronze product records.
-# Price is a hard rejection rule (no soft-flag equivalent) — an
-# unpriced or non-positive-priced product cannot safely appear in
-# any revenue calculation.
-# Incremental processing: only Bronze rows ingested since the last
-# successful run are processed, tracked via a bookmark table.
+# Uses shared configuration from 00_config for environment-aware
+# catalog/schema names. Incremental processing via bookmark table.
 # ---------------------------------------------------------
+
+# COMMAND ----------
+
+%run /Workspace/Users/adedeji2503@gmail.com/00_config
 
 # COMMAND ----------
 
@@ -26,12 +26,10 @@ logger = logging.getLogger("silver_products")
 # COMMAND ----------
 
 def get_last_processed_timestamp(table_name: str) -> str:
-    """Reads the bookmark for a given Silver table. Returns a very old
-    default timestamp if this table has never been processed before,
-    so the first run correctly treats all of Bronze as new."""
+    """Reads the bookmark for a given Silver table."""
     result = spark.sql(f"""
         SELECT MAX(last_processed_ingested_at) AS last_ts
-        FROM dataengineering.cloud_pipeline.processing_log
+        FROM {CATALOG}.{SCHEMA}.processing_log
         WHERE table_name = '{table_name}'
     """).collect()[0]["last_ts"]
     return result if result else "1900-01-01T00:00:00"
@@ -39,21 +37,18 @@ def get_last_processed_timestamp(table_name: str) -> str:
 # COMMAND ----------
 
 def update_processing_log(table_name: str, latest_ingested_at: str) -> None:
-    """Records the newest ingested_at actually processed in this run.
-    Only called after a successful merge — a bookmark that can be wrong
-    is worse than no bookmark, since it would silently skip real data
-    on every future run."""
+    """Records the newest ingested_at actually processed in this run."""
     processed_at = datetime.now(timezone.utc).isoformat()
     spark.sql(f"""
-        INSERT INTO dataengineering.cloud_pipeline.processing_log
+        INSERT INTO {CATALOG}.{SCHEMA}.processing_log
         VALUES ('{table_name}', '{latest_ingested_at}', '{processed_at}')
     """)
 
 # COMMAND ----------
 
-BRONZE_TABLE = "dataengineering.cloud_pipeline.bronze_products"
-SILVER_TABLE = "dataengineering.cloud_pipeline.silver_products"
-REJECTED_TABLE = "dataengineering.cloud_pipeline.rejected_products"
+BRONZE_TABLE = f"{CATALOG}.{SCHEMA}.bronze_products"
+SILVER_TABLE = f"{CATALOG}.{SCHEMA}.silver_products"
+REJECTED_TABLE = f"{CATALOG}.{SCHEMA}.rejected_products"
 BUSINESS_KEY = "ProductID"
 
 MIN_VALID_PRICE = 0.0
@@ -86,9 +81,8 @@ def deduplicate_latest(df: DataFrame, business_key: str, order_col: str = "inges
 # COMMAND ----------
 
 def standardize_product_fields(df: DataFrame) -> DataFrame:
-    """Trim whitespace, normalize casing on text fields, and cast Price
-    to a real numeric type. Non-numeric Price values become null via
-    try_cast rather than crashing the job."""
+    """Trim whitespace, normalize casing, and cast Price to a real
+    numeric type via try_cast."""
     return (
         df.withColumn("ProductName", initcap(trim(col("ProductName"))))
           .withColumn("Category", initcap(trim(col("Category"))))
@@ -98,8 +92,7 @@ def standardize_product_fields(df: DataFrame) -> DataFrame:
 # COMMAND ----------
 
 def validate_products(df: DataFrame) -> DataFrame:
-    """Price is a hard rejection rule — a null or non-positive price
-    breaks financial/reporting integrity."""
+    """Price is a hard rejection rule."""
     return (
         df.withColumn("is_price_valid", col("Price").isNotNull() & (col("Price") > MIN_VALID_PRICE))
           .withColumn(

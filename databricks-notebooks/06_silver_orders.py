@@ -1,14 +1,14 @@
 # Databricks notebook source
 # ---------------------------------------------------------
 # Silver Layer — Orders
-# Deduplicates, standardizes, and validates Bronze order records.
-# Validity here is relational: an order is only valid if it references
-# a real, known CustomerID and ProductID in their respective Silver
-# tables. This is the only Silver script that depends on other Silver
-# tables rather than just its own Bronze source.
-# Incremental processing: only Bronze rows ingested since the last
-# successful run are processed, tracked via a bookmark table.
+# Uses shared configuration from 00_config. Validity is relational —
+# depends on Silver Customers and Silver Products. Incremental
+# processing via bookmark table.
 # ---------------------------------------------------------
+
+# COMMAND ----------
+
+%run /Workspace/Users/adedeji2503@gmail.com/00_config
 
 # COMMAND ----------
 
@@ -26,12 +26,10 @@ logger = logging.getLogger("silver_orders")
 # COMMAND ----------
 
 def get_last_processed_timestamp(table_name: str) -> str:
-    """Reads the bookmark for a given Silver table. Returns a very old
-    default timestamp if this table has never been processed before,
-    so the first run correctly treats all of Bronze as new."""
+    """Reads the bookmark for a given Silver table."""
     result = spark.sql(f"""
         SELECT MAX(last_processed_ingested_at) AS last_ts
-        FROM dataengineering.cloud_pipeline.processing_log
+        FROM {CATALOG}.{SCHEMA}.processing_log
         WHERE table_name = '{table_name}'
     """).collect()[0]["last_ts"]
     return result if result else "1900-01-01T00:00:00"
@@ -39,25 +37,22 @@ def get_last_processed_timestamp(table_name: str) -> str:
 # COMMAND ----------
 
 def update_processing_log(table_name: str, latest_ingested_at: str) -> None:
-    """Records the newest ingested_at actually processed in this run.
-    Only called after a successful merge — a bookmark that can be wrong
-    is worse than no bookmark, since it would silently skip real data
-    on every future run."""
+    """Records the newest ingested_at actually processed in this run."""
     processed_at = datetime.now(timezone.utc).isoformat()
     spark.sql(f"""
-        INSERT INTO dataengineering.cloud_pipeline.processing_log
+        INSERT INTO {CATALOG}.{SCHEMA}.processing_log
         VALUES ('{table_name}', '{latest_ingested_at}', '{processed_at}')
     """)
 
 # COMMAND ----------
 
-BRONZE_TABLE = "dataengineering.cloud_pipeline.bronze_orders"
-SILVER_TABLE = "dataengineering.cloud_pipeline.silver_orders"
-REJECTED_TABLE = "dataengineering.cloud_pipeline.rejected_orders"
+BRONZE_TABLE = f"{CATALOG}.{SCHEMA}.bronze_orders"
+SILVER_TABLE = f"{CATALOG}.{SCHEMA}.silver_orders"
+REJECTED_TABLE = f"{CATALOG}.{SCHEMA}.rejected_orders"
 BUSINESS_KEY = "OrderID"
 
-SILVER_CUSTOMERS_TABLE = "dataengineering.cloud_pipeline.silver_customers"
-SILVER_PRODUCTS_TABLE = "dataengineering.cloud_pipeline.silver_products"
+SILVER_CUSTOMERS_TABLE = f"{CATALOG}.{SCHEMA}.silver_customers"
+SILVER_PRODUCTS_TABLE = f"{CATALOG}.{SCHEMA}.silver_products"
 
 MIN_VALID_QUANTITY = 0
 
@@ -92,10 +87,8 @@ def deduplicate_latest(df: DataFrame, business_key: str, order_col: str = "inges
 # COMMAND ----------
 
 def standardize_order_fields(df: DataFrame) -> DataFrame:
-    """Casts Quantity to a real integer (confirmed string-typed via
-    profiling, despite clean-looking values) and resolves OrderDate's
-    mixed M/D/YYYY and D/M/YYYY formats, plus the literal 'null' string
-    bug, using try_to_date with a fallback pattern."""
+    """Casts Quantity to a real integer and resolves OrderDate's mixed
+    formats using try_to_date with a fallback pattern."""
     return (
         df.withColumn("Quantity", expr("try_cast(Quantity AS INT)"))
           .withColumn(
@@ -110,9 +103,8 @@ def standardize_order_fields(df: DataFrame) -> DataFrame:
 # COMMAND ----------
 
 def validate_orders(df: DataFrame, df_customers: DataFrame, df_products: DataFrame) -> DataFrame:
-    """Rejects orders that reference a non-existent CustomerID or
-    ProductID (referential integrity), have a non-positive Quantity,
-    or have a missing/unparseable OrderDate."""
+    """Rejects orders referencing a non-existent CustomerID/ProductID,
+    a non-positive Quantity, or a missing/unparseable OrderDate."""
 
     valid_customer_ids = df_customers.select("CustomerID").distinct().withColumnRenamed("CustomerID", "valid_cust_id")
     valid_product_ids = df_products.select("ProductID").distinct().withColumnRenamed("ProductID", "valid_prod_id")
@@ -144,8 +136,7 @@ def validate_orders(df: DataFrame, df_customers: DataFrame, df_products: DataFra
 
 def run_silver_orders() -> dict:
     """Executes the full Silver processing run with incremental
-    processing via the bookmark table, including referential integrity
-    checks against Silver Customers and Silver Products."""
+    processing via the bookmark table, including referential integrity."""
     run_started_at = datetime.now(timezone.utc).isoformat()
     logger.info("Silver Orders run started")
 
