@@ -2,11 +2,12 @@
 # ---------------------------------------------------------
 # Silver Layer — Orders
 # Deduplicates, standardizes, and validates Bronze order records.
-# Unlike Customers/Products, validity here is relational: an order
-# is only valid if it references a real, known CustomerID and ProductID
-# in their respective Silver tables. This is the only Silver script
-# that depends on other Silver tables rather than just its own Bronze
-# source.
+# Validity here is relational: an order is only valid if it references
+# a real, known CustomerID and ProductID in their respective Silver
+# tables. This is the only Silver script that depends on other Silver
+# tables rather than just its own Bronze source.
+# Incremental processing: only Bronze rows ingested since the last
+# successful run are processed, tracked via a bookmark table.
 # ---------------------------------------------------------
 
 # COMMAND ----------
@@ -21,6 +22,32 @@ from pyspark.sql.functions import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("silver_orders")
+
+# COMMAND ----------
+
+def get_last_processed_timestamp(table_name: str) -> str:
+    """Reads the bookmark for a given Silver table. Returns a very old
+    default timestamp if this table has never been processed before,
+    so the first run correctly treats all of Bronze as new."""
+    result = spark.sql(f"""
+        SELECT MAX(last_processed_ingested_at) AS last_ts
+        FROM dataengineering.cloud_pipeline.processing_log
+        WHERE table_name = '{table_name}'
+    """).collect()[0]["last_ts"]
+    return result if result else "1900-01-01T00:00:00"
+
+# COMMAND ----------
+
+def update_processing_log(table_name: str, latest_ingested_at: str) -> None:
+    """Records the newest ingested_at actually processed in this run.
+    Only called after a successful merge — a bookmark that can be wrong
+    is worse than no bookmark, since it would silently skip real data
+    on every future run."""
+    processed_at = datetime.now(timezone.utc).isoformat()
+    spark.sql(f"""
+        INSERT INTO dataengineering.cloud_pipeline.processing_log
+        VALUES ('{table_name}', '{latest_ingested_at}', '{processed_at}')
+    """)
 
 # COMMAND ----------
 
@@ -116,19 +143,33 @@ def validate_orders(df: DataFrame, df_customers: DataFrame, df_products: DataFra
 # COMMAND ----------
 
 def run_silver_orders() -> dict:
-    """Executes the full Silver processing run: profile → dedup → clean
-    → validate (including referential integrity against Silver Customers
-    and Silver Products) → merge/reject."""
+    """Executes the full Silver processing run with incremental
+    processing via the bookmark table, including referential integrity
+    checks against Silver Customers and Silver Products."""
     run_started_at = datetime.now(timezone.utc).isoformat()
     logger.info("Silver Orders run started")
 
-    df_bronze = spark.read.table(BRONZE_TABLE)
+    last_processed = get_last_processed_timestamp("orders")
+    logger.info(f"Last processed timestamp: {last_processed}")
+
+    df_bronze = spark.read.table(BRONZE_TABLE).filter(col("ingested_at") > last_processed)
+    rows_read = df_bronze.count()
+
+    if rows_read == 0:
+        logger.info("No new rows to process — skipping run.")
+        return {
+            "run_started_at": run_started_at,
+            "run_completed_at": datetime.now(timezone.utc).isoformat(),
+            "rows_read": 0,
+            "rows_good": 0,
+            "rows_rejected": 0,
+            "status": "skipped_no_new_data",
+        }
+
     profile_bronze_table(df_bronze, "bronze_orders")
 
     df_silver_customers = spark.read.table(SILVER_CUSTOMERS_TABLE)
     df_silver_products = spark.read.table(SILVER_PRODUCTS_TABLE)
-
-    rows_read = df_bronze.count()
 
     df_deduped = deduplicate_latest(df_bronze, BUSINESS_KEY)
     df_cleaned = standardize_order_fields(df_deduped)
@@ -158,6 +199,9 @@ def run_silver_orders() -> dict:
 
     if rows_rejected > 0:
         df_rejected.write.mode("append").saveAsTable(REJECTED_TABLE)
+
+    latest_ingested_at = df_bronze.agg({"ingested_at": "max"}).collect()[0][0]
+    update_processing_log("orders", latest_ingested_at)
 
     metrics = {
         "run_started_at": run_started_at,
