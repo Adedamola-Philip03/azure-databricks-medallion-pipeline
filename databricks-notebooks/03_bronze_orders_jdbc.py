@@ -1,9 +1,14 @@
 # Databricks notebook source
 # ---------------------------------------------------------
 # Bronze Layer — Orders (Cloud Source: Azure SQL Database)
-# Quantity and OrderDate stay untouched as raw strings here — casting
-# and date parsing are Silver concerns, not Bronze's.
+# Uses shared configuration from 00_config. Quantity and OrderDate stay
+# untouched as raw strings here — casting and date parsing are Silver
+# concerns, not Bronze's.
 # ---------------------------------------------------------
+
+# COMMAND ----------
+
+%run /Workspace/Users/adedeji2503@gmail.com/00_config
 
 # COMMAND ----------
 
@@ -16,27 +21,8 @@ from pyspark.sql.functions import lit, sha2, concat_ws, current_user
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("bronze_orders")
 
-# COMMAND ----------
-
-JDBC_HOSTNAME = "wolfsanalytics.database.windows.net"
-JDBC_PORT = 1433
-JDBC_DATABASE = "DataEngineeringPractice"
 SOURCE_TABLE = "dbo.orders_raw_import"
-BRONZE_TABLE = "dataengineering.cloud_pipeline.bronze_orders"
-
-JDBC_URL = f"jdbc:sqlserver://{JDBC_HOSTNAME}:{JDBC_PORT};database={JDBC_DATABASE};encrypt=true;trustServerCertificate=false;loginTimeout=30"
-
-# COMMAND ----------
-
-def get_connection_properties() -> dict:
-    """Builds JDBC connection properties, retrieving the password
-    securely from Databricks Secrets at call time — never hardcoded."""
-    sql_password = dbutils.secrets.get(scope="azure-sql-secrets", key="sql-admin-password")
-    return {
-        "user": "wolfsanalytics_admin",
-        "password": sql_password,
-        "driver": "com.microsoft.sqlserver.jdbc.SQLServerDriver"
-    }
+BRONZE_TABLE = f"{CATALOG}.{SCHEMA}.bronze_orders"
 
 # COMMAND ----------
 
@@ -48,9 +34,7 @@ def read_source_table() -> DataFrame:
 # COMMAND ----------
 
 def attach_lineage(df: DataFrame, batch_id: str, ingested_at: str) -> DataFrame:
-    """Attaches lineage columns to every row. Quantity and OrderDate
-    stay untouched here (still raw string) — casting and date parsing
-    are Silver concerns, not Bronze's."""
+    """Attaches lineage columns to every row."""
     return (
         df
         .withColumn("batch_id", lit(batch_id))

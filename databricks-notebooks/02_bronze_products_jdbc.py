@@ -1,9 +1,13 @@
 # Databricks notebook source
 # ---------------------------------------------------------
 # Bronze Layer — Products (Cloud Source: Azure SQL Database)
-# Price stays untouched as raw string here — type casting is a Silver
-# concern, not Bronze's.
+# Uses shared configuration from 00_config. Price stays untouched as
+# raw string here — type casting is a Silver concern, not Bronze's.
 # ---------------------------------------------------------
+
+# COMMAND ----------
+
+%run /Workspace/Users/adedeji2503@gmail.com/00_config
 
 # COMMAND ----------
 
@@ -16,27 +20,8 @@ from pyspark.sql.functions import lit, sha2, concat_ws, current_user
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("bronze_products")
 
-# COMMAND ----------
-
-JDBC_HOSTNAME = "wolfsanalytics.database.windows.net"
-JDBC_PORT = 1433
-JDBC_DATABASE = "DataEngineeringPractice"
 SOURCE_TABLE = "dbo.products_raw_import"
-BRONZE_TABLE = "dataengineering.cloud_pipeline.bronze_products"
-
-JDBC_URL = f"jdbc:sqlserver://{JDBC_HOSTNAME}:{JDBC_PORT};database={JDBC_DATABASE};encrypt=true;trustServerCertificate=false;loginTimeout=30"
-
-# COMMAND ----------
-
-def get_connection_properties() -> dict:
-    """Builds JDBC connection properties, retrieving the password
-    securely from Databricks Secrets at call time — never hardcoded."""
-    sql_password = dbutils.secrets.get(scope="azure-sql-secrets", key="sql-admin-password")
-    return {
-        "user": "wolfsanalytics_admin",
-        "password": sql_password,
-        "driver": "com.microsoft.sqlserver.jdbc.SQLServerDriver"
-    }
+BRONZE_TABLE = f"{CATALOG}.{SCHEMA}.bronze_products"
 
 # COMMAND ----------
 
@@ -48,8 +33,7 @@ def read_source_table() -> DataFrame:
 # COMMAND ----------
 
 def attach_lineage(df: DataFrame, batch_id: str, ingested_at: str) -> DataFrame:
-    """Attaches lineage columns to every row. Price stays untouched here
-    (still raw string) — type casting is a Silver concern, not Bronze's."""
+    """Attaches lineage columns to every row."""
     return (
         df
         .withColumn("batch_id", lit(batch_id))
