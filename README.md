@@ -71,6 +71,40 @@ from the SQL Warehouse's connection panel. Building out the actual Power BI
 report/dashboard on top of this connection is tracked as a next step (see
 Production Roadmap).
 
+## Natural Language Analytics (Databricks Genie)
+
+A Genie space ("Sales and Customer Insights") was configured on top of the
+Silver tables, teaching it the business semantics needed to answer natural
+language questions accurately:
+
+- **Joins:** `silver_orders ↔ silver_customers`, `silver_orders ↔ silver_products`
+- **Measures:** Total Revenue, Total Customers, Average Order Value, Total Quantity Sold
+- **Example queries:** curated question/SQL pairs (e.g. "What is the total
+  revenue by country?") teaching Genie how business questions map to the
+  underlying joins and measures
+
+### Verified working (cross-checked against Gold tables and raw SQL)
+
+- Revenue by category, by country
+- Top products by revenue and by units sold
+- Customer count by country
+- Email quality metrics (invalid/missing email rates by country) — proving
+  Genie can surface data engineering/governance fields, not just business KPIs
+- "How many units did we sell in total?" → 29, matching the sum of Gold's
+  `gold_revenue_by_category.total_units_sold` exactly
+
+### A genuine finding, not just a demo
+
+Asking Genie "which category has the highest average selling price" returned
+Electronics (480) — verified correct against a direct SQL query grouping
+Products by category. Asking "which country generates the highest revenue
+per customer" surfaced a real semantic ambiguity: the underlying query
+counts all customers (including those with zero orders) in the denominator,
+diluting the result. This is not a bug — it's a genuine business-definition
+question ("per customer" vs. "per ordering customer") that a real analytics
+team would need to clarify, and it demonstrates the importance of tracing
+generated SQL rather than trusting natural language answers at face value.
+
 ## Known Limitations
 
 - No `file_hash` equivalent for JDBC/live-table sources — only applicable to
