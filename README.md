@@ -3,7 +3,7 @@
 completing successfully, since it validates every order against both tables.
 `gold_aggregates` depends on `silver_customers` and `silver_orders`. Any
 upstream failure correctly blocks downstream tasks rather than cascading
-silently — verified in practice: a syntax error in Bronze Products and a
+silently verified in practice: a syntax error in Bronze Products and a
 misconfigured notebook path in Silver Orders were both caught this way during
 testing, with every dependent task correctly staying unrun until fixed.
 
